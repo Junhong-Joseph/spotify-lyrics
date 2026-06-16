@@ -60,11 +60,26 @@ app.get('/lyrics', async (req, res) => {
         await tryLrclib(simplifiedTrack, simplifiedArtist, "Simplified");
     }
 
-    // OUTPUT EMITTER (Always translates final payload to Simplified for ESP32 safety)
+    // HARDENED OUTPUT EMITTER (Translates and sanitizes payload strings to protect ESP32)
     if (found) {
         if (finalLyrics.syncedLyrics) finalLyrics.syncedLyrics = converter(finalLyrics.syncedLyrics);
         if (finalLyrics.plainLyrics) finalLyrics.plainLyrics = converter(finalLyrics.plainLyrics);
-        res.json(finalLyrics);
+        
+        let payloadString = finalLyrics.syncedLyrics || finalLyrics.plainLyrics;
+
+        if (payloadString) {
+            // Clean up hidden carriage returns and escape breaking control codes
+            payloadString = payloadString
+                .replace(/\r/g, '')             
+                .replace(/[\x00-\x1F]/g, (c) => { 
+                    if (c === '\n') return '\n'; // Keep clean line breaks
+                    return '';                   // Strip any other broken bytes
+                });
+
+            res.json({ syncedLyrics: payloadString });
+        } else {
+            res.status(404).json({ error: "Lyrics payload resolved to blank text layers." });
+        }
     } else {
         console.log(`[CRITICAL] Processing pipeline failed to resolve any valid indices.`);
         res.status(404).json({ error: "Lyrics not found in any database down the fallback chain." });
