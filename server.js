@@ -8,88 +8,60 @@ const port = process.env.PORT || 3000;
 const converter = OpenCC.Converter({ from: 'hk', to: 'cn' });
 
 const client = axios.create({
-    timeout: 10000, 
-    headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'application/json'
-    }
+    timeout: 6000, // Drop timeout down to 6s because indexed lookups are fast
+    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
 });
 
-app.get('/', (req, res) => {
-    res.send('Lyrics Aggregator Proxy is running successfully!');
-});
+app.get('/', (req, res) => res.send('High-Speed Proxy Active'));
 
 app.get('/lyrics', async (req, res) => {
-    let { track_name, artist_name } = req.query;
+    let { track_name, artist_name, duration } = req.query;
 
     if (!track_name || !artist_name) {
-        return res.status(400).json({ error: "Missing track or artist name" });
+        return res.status(400).json({ error: "Missing parameters" });
     }
 
-    // SMART DECODING LAYER: If the ESP32 double-encoded the text, decode it back cleanly!
+    // Smart decoding pass
     if (track_name.includes('%25')) track_name = decodeURIComponent(track_name);
     if (artist_name.includes('%25')) artist_name = decodeURIComponent(artist_name);
 
     const simplifiedTrack = converter(track_name).trim();
     const simplifiedArtist = converter(artist_name).trim();
 
-    let finalLyrics = { syncedLyrics: null, plainLyrics: null };
-    let found = false;
-
-    // Helper function to query LRCLIB dynamically
-    const tryLrclib = async (tName, aName, attemptName) => {
-        try {
-            console.log(`[LRCLIB] ${attemptName} Search: "${tName}" - ${aName}`);
-            const lrclibUrl = `https://lrclib.net/api/get?track_name=${encodeURIComponent(tName)}&artist_name=${encodeURIComponent(aName)}`;
-            const response = await client.get(lrclibUrl);
-            
-            if (response.data && (response.data.syncedLyrics || response.data.plainLyrics)) {
-                finalLyrics.syncedLyrics = response.data.syncedLyrics;
-                finalLyrics.plainLyrics = response.data.plainLyrics;
-                found = true;
-                console.log(` -> SUCCESS: Found via ${attemptName} string.`);
-                return true;
-            }
-        } catch (error) {
-            console.log(` -> LRCLIB ${attemptName} FAIL: ${error.response ? `HTTP ${error.response.status}` : error.message}`);
+    const fetchLrc = async (track, artist) => {
+        // High-Speed Route Switch: Append duration to trigger instant indexed mapping
+        let url = `https://lrclib.net/api/get?track_name=${encodeURIComponent(track)}&artist_name=${encodeURIComponent(artist)}`;
+        if (duration && !isNaN(duration)) {
+            url += `&duration=${Math.round(duration)}`;
         }
-        return false;
+        const response = await client.get(url);
+        return response.data && (response.data.syncedLyrics || response.data.plainLyrics) ? response.data : null;
     };
 
-    // LAYER 1: Try the exact original text first (Catches Taiwanese/HK Spotify tracks)
-    await tryLrclib(track_name, artist_name, "Original");
-
-    // LAYER 2: Try the Simplified text (If the original failed)
-    if (!found && (simplifiedTrack !== track_name || simplifiedArtist !== artist_name)) {
-        await tryLrclib(simplifiedTrack, simplifiedArtist, "Simplified");
-    }
-
-    // HARDENED OUTPUT EMITTER (Translates and sanitizes payload strings to protect ESP32)
-    if (found) {
-        if (finalLyrics.syncedLyrics) finalLyrics.syncedLyrics = converter(finalLyrics.syncedLyrics);
-        if (finalLyrics.plainLyrics) finalLyrics.plainLyrics = converter(finalLyrics.plainLyrics);
+    try {
+        let data = null;
+        console.log(`[Fast-Track] Querying database for: ${track_name}`);
         
-        let payloadString = finalLyrics.syncedLyrics || finalLyrics.plainLyrics;
-
-        if (payloadString) {
-            // Clean up hidden carriage returns and escape breaking control codes
-            payloadString = payloadString
-                .replace(/\r/g, '')             
-                .replace(/[\x00-\x1F]/g, (c) => { 
-                    if (c === '\n') return '\n'; // Keep clean line breaks
-                    return '';                   // Strip any other broken bytes
-                });
-
-            res.json({ syncedLyrics: payloadString });
-        } else {
-            res.status(404).json({ error: "Lyrics payload resolved to blank text layers." });
+        // Try Original Encoding
+        try { data = await fetchLrc(track_name, artist_name); } catch(e) {}
+        
+        // Try Simplified Fallback
+        if (!data && (simplifiedTrack !== track_name || simplifiedArtist !== artist_name)) {
+            try { data = await fetchLrc(simplifiedTrack, simplifiedArtist); } catch(e) {}
         }
-    } else {
-        console.log(`[CRITICAL] Processing pipeline failed to resolve any valid indices.`);
-        res.status(404).json({ error: "Lyrics not found in any database down the fallback chain." });
+
+        if (data) {
+            let payloadString = data.syncedLyrics || data.plainLyrics;
+            payloadString = converter(payloadString)
+                .replace(/\r/g, '')             
+                .replace(/[\x00-\x1F]/g, (c) => (c === '\n' ? '\n' : ''));
+
+            return res.json({ syncedLyrics: payloadString });
+        }
+        res.status(404).json({ error: "Not found" });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
 });
 
-app.listen(port, () => {
-    console.log(`Dynamic Aggregator Proxy actively listening on port ${port}`);
-});
+app.listen(port, () => console.log(`Speed Proxy online on port ${port}`));
