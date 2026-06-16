@@ -8,7 +8,7 @@ const port = process.env.PORT || 3000;
 const converter = OpenCC.Converter({ from: 'hk', to: 'cn' });
 
 const client = axios.create({
-    timeout: 6000, // Drop timeout down to 6s because indexed lookups are fast
+    timeout: 8000, 
     headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
 });
 
@@ -21,35 +21,62 @@ app.get('/lyrics', async (req, res) => {
         return res.status(400).json({ error: "Missing parameters" });
     }
 
-    // Smart decoding pass
-    if (track_name.includes('%25')) track_name = decodeURIComponent(track_name);
-    if (artist_name.includes('%25')) artist_name = decodeURIComponent(artist_name);
+    // FIX 1: Robust Double-Decoding Matrix
+    // Checks if the string still contains valid URL hex codes (like %E6) and decodes them safely
+    const safeDecode = (str) => {
+        try {
+            if (/%[0-9A-Fa-f]{2}/.test(str)) return decodeURIComponent(str);
+        } catch (e) { console.log("Decode bypassed"); }
+        return str;
+    };
+    
+    track_name = safeDecode(track_name);
+    artist_name = safeDecode(artist_name);
 
     const simplifiedTrack = converter(track_name).trim();
     const simplifiedArtist = converter(artist_name).trim();
 
-    const fetchLrc = async (track, artist) => {
-        // High-Speed Route Switch: Append duration to trigger instant indexed mapping
+    // Helper function now accepts a 'useDuration' flag
+    const fetchLrc = async (track, artist, useDuration) => {
         let url = `https://lrclib.net/api/get?track_name=${encodeURIComponent(track)}&artist_name=${encodeURIComponent(artist)}`;
-        if (duration && !isNaN(duration)) {
+        if (useDuration && duration && !isNaN(duration)) {
             url += `&duration=${Math.round(duration)}`;
         }
-        const response = await client.get(url);
-        return response.data && (response.data.syncedLyrics || response.data.plainLyrics) ? response.data : null;
+        try {
+            const response = await client.get(url);
+            return response.data && (response.data.syncedLyrics || response.data.plainLyrics) ? response.data : null;
+        } catch (error) {
+            return null; // Catch 404s silently so fallbacks can execute
+        }
     };
 
     try {
         let data = null;
-        console.log(`[Fast-Track] Querying database for: ${track_name}`);
+        console.log(`[Search] Querying: ${track_name}`);
         
-        // Try Original Encoding
-        try { data = await fetchLrc(track_name, artist_name); } catch(e) {}
-        
-        // Try Simplified Fallback
+        // ==========================================
+        // LAYER 1: Ultra-Fast Indexed Search
+        // ==========================================
+        data = await fetchLrc(track_name, artist_name, true);
         if (!data && (simplifiedTrack !== track_name || simplifiedArtist !== artist_name)) {
-            try { data = await fetchLrc(simplifiedTrack, simplifiedArtist); } catch(e) {}
+            data = await fetchLrc(simplifiedTrack, simplifiedArtist, true);
         }
 
+        // ==========================================
+        // LAYER 2: Fallback Text Search (FIX 2)
+        // If Layer 1 failed, it's likely a duration mismatch. Drop duration and try again!
+        // ==========================================
+        if (!data) {
+            console.log(` -> Duration strict-match failed. Falling back to fuzzy text search...`);
+            data = await fetchLrc(track_name, artist_name, false);
+        }
+        if (!data && (simplifiedTrack !== track_name || simplifiedArtist !== artist_name)) {
+            data = await fetchLrc(simplifiedTrack, simplifiedArtist, false);
+        }
+
+        // ==========================================
+        // OUTPUT EMITTER
+        // ==========================================
         if (data) {
             let payloadString = data.syncedLyrics || data.plainLyrics;
             payloadString = converter(payloadString)
@@ -58,7 +85,7 @@ app.get('/lyrics', async (req, res) => {
 
             return res.json({ syncedLyrics: payloadString });
         }
-        res.status(404).json({ error: "Not found" });
+        res.status(404).json({ error: "Not found in database" });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
