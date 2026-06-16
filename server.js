@@ -37,8 +37,9 @@ app.get('/lyrics', async (req, res) => {
     // THE NEW "SMART SEARCH" ALGORITHM
     // ==========================================
     const fetchLrc = async (track, artist, targetDuration) => {
-        // We use /api/search now, which returns an array of ALL matching songs
-        const url = `https://lrclib.net/api/search?track_name=${encodeURIComponent(track)}&artist_name=${encodeURIComponent(artist)}`;
+        // FIX: Combine track and artist into a single 'q' parameter for true fuzzy searching
+        const searchQuery = `${track} ${artist}`;
+        const url = `https://lrclib.net/api/search?q=${encodeURIComponent(searchQuery)}`;
 
         try {
             const response = await client.get(url, { timeout: 6000 });
