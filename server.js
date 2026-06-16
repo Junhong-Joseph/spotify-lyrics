@@ -20,11 +20,15 @@ app.get('/', (req, res) => {
 });
 
 app.get('/lyrics', async (req, res) => {
-    const { track_name, artist_name } = req.query;
+    let { track_name, artist_name } = req.query;
 
     if (!track_name || !artist_name) {
         return res.status(400).json({ error: "Missing track or artist name" });
     }
+
+    // SMART DECODING LAYER: If the ESP32 double-encoded the text, decode it back cleanly!
+    if (track_name.includes('%25')) track_name = decodeURIComponent(track_name);
+    if (artist_name.includes('%25')) artist_name = decodeURIComponent(artist_name);
 
     const simplifiedTrack = converter(track_name).trim();
     const simplifiedArtist = converter(artist_name).trim();
