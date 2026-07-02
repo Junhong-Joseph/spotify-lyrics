@@ -11,6 +11,10 @@ const client = axios.create({
     headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
 });
 
+// Strips carriage returns / stray control chars while keeping newlines.
+// (Combined into one pass instead of two separate .replace() calls.)
+const cleanText = (str) => str.replace(/\r/g, '').replace(/[\x00-\x09\x0B-\x1F]/g, '');
+
 app.get('/', (req, res) => res.send('High-Speed Proxy Active'));
 
 app.get('/lyrics', async (req, res) => {
@@ -24,12 +28,11 @@ app.get('/lyrics', async (req, res) => {
     // ABORT CONTROLLER: The "Kill Switch"
     // ==========================================
     const abortController = new AbortController();
-    
-    // If the ESP32 disconnects early (e.g., user skips song), kill the upstream request
+
     req.on('close', () => {
         if (!res.writableEnded) {
             console.log(`\n[ABORT] ESP32 disconnected. Canceling search for: ${track_name}`);
-            abortController.abort(); // Triggers the kill signal
+            abortController.abort();
         }
     });
 
@@ -39,10 +42,13 @@ app.get('/lyrics', async (req, res) => {
         } catch (e) { console.log("Decode bypassed"); }
         return str;
     };
-    
+
     track_name = safeDecode(track_name);
     artist_name = safeDecode(artist_name);
 
+    // These are computed once and reused both for the search fallback AND
+    // as the values sent back to the ESP32, so the on-screen title/artist
+    // are always Simplified Chinese too (not just the lyrics body).
     const simplifiedTrack = converter(track_name).trim();
     const simplifiedArtist = converter(artist_name).trim();
 
@@ -54,10 +60,9 @@ app.get('/lyrics', async (req, res) => {
         const url = `https://lrclib.net/api/search?q=${encodeURIComponent(searchQuery)}`;
 
         try {
-            // We pass the abort signal into the Axios request
-            const response = await client.get(url, { 
-                timeout: 12000, 
-                signal: signal 
+            const response = await client.get(url, {
+                timeout: 12000,
+                signal: signal
             });
             let results = response.data;
 
@@ -68,7 +73,7 @@ app.get('/lyrics', async (req, res) => {
 
             if (targetDuration && !isNaN(targetDuration)) {
                 const targetSec = Math.round(targetDuration);
-                
+
                 validResults.sort((a, b) => {
                     const diffA = Math.abs((a.duration || 0) - targetSec);
                     const diffB = Math.abs((b.duration || 0) - targetSec);
@@ -76,19 +81,18 @@ app.get('/lyrics', async (req, res) => {
                 });
 
                 console.log(` -> SUCCESS: Target: ${targetSec}s | Database: ${validResults[0].duration}s`);
-                return validResults[0]; 
+                return validResults[0];
             }
 
             console.log(` -> SUCCESS: Found match (No duration sort applied)`);
             return validResults[0];
 
         } catch (error) {
-            // Intercept the specific abort error so it doesn't log as a CRITICAL failure
             if (axios.isCancel(error)) {
                 console.log(` -> [CANCELLED] Upstream request to LRCLIB cleanly aborted.`);
                 return null;
             }
-            
+
             if (error.code === 'ECONNABORTED') {
                 console.log(` -> [LRCLIB ERROR] Server took longer than 12 seconds to respond (Timeout).`);
             } else if (error.response) {
@@ -97,35 +101,43 @@ app.get('/lyrics', async (req, res) => {
             } else {
                 console.log(` -> [NETWORK ERROR] ${error.message}`);
             }
-            return null; 
+            return null;
         }
     };
 
     try {
         let data = null;
         console.log(`\n[Search] Querying: ${track_name} - ${artist_name}`);
-        
-        // Pass the abortController.signal into the fetch function
+
         data = await fetchLrc(track_name, artist_name, duration, abortController.signal);
-        
+
         if (!data && !abortController.signal.aborted && (simplifiedTrack !== track_name || simplifiedArtist !== artist_name)) {
             console.log(` -> Original text failed, trying Simplified Chinese...`);
             data = await fetchLrc(simplifiedTrack, simplifiedArtist, duration, abortController.signal);
         }
 
         if (data) {
-            let payloadString = data.syncedLyrics || data.plainLyrics;
-            payloadString = converter(payloadString)
-                .replace(/\r/g, '')             
-                .replace(/[\x00-\x1F]/g, (c) => (c === '\n' ? '\n' : ''));
+            const payloadString = cleanText(converter(data.syncedLyrics || data.plainLyrics));
 
-            return res.json({ syncedLyrics: payloadString });
+            // Return the Simplified-Chinese title/artist alongside the lyrics
+            // so the ESP32 can render a fully-simplified display without
+            // doing any conversion work itself.
+            return res.json({
+                trackName: simplifiedTrack,
+                artistName: simplifiedArtist,
+                syncedLyrics: payloadString
+            });
         }
-        
-        // Only log critical failure if the request wasn't manually aborted by a song skip
+
         if (!abortController.signal.aborted) {
             console.log(`[CRITICAL] Processing pipeline failed to resolve any valid indices.`);
-            res.status(404).json({ error: "Not found in database" });
+            // Even when no lyrics are found, still hand back the translated
+            // title/artist so the "No lyrics" screen shows Simplified Chinese.
+            res.status(404).json({
+                error: "Not found in database",
+                trackName: simplifiedTrack,
+                artistName: simplifiedArtist
+            });
         }
     } catch (err) {
         if (!abortController.signal.aborted) {
